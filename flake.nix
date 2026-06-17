@@ -30,6 +30,7 @@
             
             # Open Editors
             codium .
+            cursor . --classic
           '';
         };
       }

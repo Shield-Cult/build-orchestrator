@@ -1,8 +1,10 @@
+import EventEmitter from "events";
+
 export function Debouncer<Params extends unknown[]>(callback: (...params: Params) => unknown, timeoutMs: number) {
     let timeout: NodeJS.Timeout | undefined = undefined
     return {
-        Exec: (...params: Params) => (timeout?.close(), timeout = setTimeout(() => callback(...params), timeoutMs)),
-        Terminate: () => (timeout?.close(), timeout = undefined),
+        Exec: (...params: Params) => (timeout && clearTimeout(timeout), timeout = setTimeout(() => callback(...params), timeoutMs)),
+        Terminate: () => (timeout && clearTimeout(timeout), timeout = undefined),
     }
 }
 
@@ -11,39 +13,44 @@ type Debouncer<Params extends unknown[] = []> = ReturnType<typeof Debouncer<Para
 // Allow adding new entrypoints/deps in real time (forces rebuild)
 // Allow rebuild debounce
 
-export type BuildResult<Metadata extends object> = Partial<Metadata> &
+export type BuildResult<Metadata extends object, ErrorCode extends string> = BuilderBuildResult<Metadata, ErrorCode> | (Partial<Metadata> & {
+    state: 'built'
+    buildStyle: 'cached'
+})
+
+export type BuilderBuildResult<Metadata extends object, ErrorCode extends string> = Partial<Metadata> &
     (
         | {
             state: 'built'
-            // Full - full build, cached - didn't change => skipped
-            buildStyle: 'full' | 'cached'
+            buildStyle: 'full'
         }
         | {
             state: 'error'
-            errors: BuildError[]
+            errors: BuildError<ErrorCode>[]
         }
     )
 
-export type BuildStatus<ItemId extends string, Metadata extends object> = {
+export type BuildStatus<ItemId extends string, Metadata extends object, ErrorCode extends string> = {
     /** The last _successful_ build id - does not update when the build errors even as the rest of the data does */
     _lastBuildId: number
     _lastChangedBuildId: number
     _buildData:
     {
         // The builder that processed this entrypoint 
-        builder: ReturnType<Builder<ItemId, Metadata>>
+        builder: BuilderInstance<ItemId, Metadata, ErrorCode>
     } &
     (
         | {
             // This state can only happen before the first build
             state: 'pending'
         }
-        | BuildResult<Metadata>
+        | BuildResult<Metadata, ErrorCode>
     )
 }
 
-export type BuildError = {
+export type BuildError<ErrorCode extends string> = {
     errorType: 'compile-error' | 'validation-error' | 'dependency-failure';
+    errorCode: ErrorCode | 'build-aborted' | 'unknown-error';
     message: string;
     location?: string;
 }
@@ -58,22 +65,28 @@ export type BuildError = {
  */
 export type EntrypointChanged = 'discovered' | 'changed' | 'dependencies-changed' | 'deleted'
 
-export type Builder<ItemId extends string, Metadata extends object> = (ItemId: ItemId, prod: boolean) => {
-    builderId: string;
+export type BuilderInstance<ItemId extends string, Metadata extends object, ErrorCode extends string> = {
+    builderType: string;
     itemId: ItemId;
     dependencies: () => ItemId[];
     watch: (onChange: (change: Extract<EntrypointChanged, 'changed' | 'dependencies-changed'>) => void) => Promise<void>;
-    build: (metadata: Partial<Metadata>) => Promise<BuildResult<Metadata>>
+    build: (metadata: Partial<Metadata>) => Promise<BuilderBuildResult<Metadata, ErrorCode>>
     dispose: (metadata: Partial<Metadata>) => Promise<void>
-};
+}
 
-export default class BuildOrchestrator<ItemIds extends string, Metadata extends object> {
+export type Builder<ItemId extends string, Metadata extends object, ErrorCode extends string> = (itemId: ItemId, prod: boolean) =>
+    BuilderInstance<ItemId, Metadata, ErrorCode>;
+
+export type BuildStatusCode = 'started' | 'interrupted' | 'finished';
+
+export default class BuildOrchestrator<ItemIds extends string, Metadata extends object, ErrorCode extends string> {
     private _currentBuildId = 0;
+    private _isCurrentlyBuilding = false;
     private _lastBuildSucceeded = false;
     private _currentlyBuilding = new Map<ItemIds, AbortController>();
     private _remainingBuildItems = new Set<ItemIds>();
     private _buildStatus: {
-        [Key in ItemIds]?: BuildStatus<Key, Metadata>
+        [Key in ItemIds]?: BuildStatus<Key, Metadata, ErrorCode>
     } = {};
 
     private _dependsOn: {
@@ -83,21 +96,25 @@ export default class BuildOrchestrator<ItemIds extends string, Metadata extends 
         [Key in ItemIds]?: Set<ItemIds>
     } = {};
 
-    private _buildDebounce;
+    private readonly _prod: boolean;
+    private readonly _watch: boolean;
+    private readonly _buildDebounce: Debouncer;
 
     public constructor(
-        private readonly prod: boolean,
-        private readonly watch: boolean,
+        prod: boolean,
+        watch: boolean,
         debounceMs: number,
     ) {
+        this._prod = prod;
+        this._watch = watch;
         this._buildDebounce = Debouncer(() => this.StartBuild(), debounceMs);
     }
 
     public get IsCurrentlyBuilding() {
-        return this._currentlyBuilding.size > 0 || this._remainingBuildItems.size > 0;
+        return this._isCurrentlyBuilding;
     }
 
-    public get BuildReport(): { readonly [Key in ItemIds]?: Readonly<BuildStatus<Key, Metadata>> } {
+    public get BuildReport(): { readonly [Key in ItemIds]?: Readonly<BuildStatus<Key, Metadata, ErrorCode>> } {
         return this._buildStatus;
     }
 
@@ -105,7 +122,13 @@ export default class BuildOrchestrator<ItemIds extends string, Metadata extends 
         return !this.IsCurrentlyBuilding && this._lastBuildSucceeded;
     }
 
+    public readonly Events = new EventEmitter<{
+        'build-status-changed': [BuildStatusCode];
+    }>();
+
+
     public ForceRebuild() {
+        this._buildDebounce.Terminate();
         this.InterruptBuild();
         const allItems = Object.keys(this._buildStatus) as ItemIds[];
         allItems.forEach(itemId => this._buildStatus[itemId]!._lastChangedBuildId = this._currentBuildId + 1);
@@ -114,30 +137,34 @@ export default class BuildOrchestrator<ItemIds extends string, Metadata extends 
 
     private StartBuild() {
         // We can't start a build while we're already in the middle of one
-        if(this.IsCurrentlyBuilding) return;
+        if (this.IsCurrentlyBuilding) return;
+        this.Events.emit('build-status-changed', 'started');
         // Increment the build id
         this._currentBuildId++;
+        this._isCurrentlyBuilding = true;
         const allItems = Object.keys(this._buildStatus) as ItemIds[];
         const rootItems = allItems.filter(itemId => !this._dependsOn[itemId]);
-        
+
         // Mark all items as planned for building
-        allItems.forEach(itemId => this._remainingBuildItems.add(itemId));        
+        allItems.forEach(itemId => this._remainingBuildItems.add(itemId));
         // Initiate build for all root entry points
         rootItems.forEach(itemId => this.TryRebuildEntrypoint(itemId));
         // Try to finish the build (for cases where no root entrypoints were found)
         this.TryFinishBuild();
     }
 
-    private TryRebuildEntrypoint<ItemId extends ItemIds>(itemId: ItemId) {
+    private TryRebuildEntrypoint<ItemId extends ItemIds>(itemId: ItemId, dependencyChanged: boolean = false) {
         const dependsOn = this._dependsOn[itemId];
+        // This should always exist
+        const status = this._buildStatus[itemId]!;
+        const builder = status._buildData.builder;
+
+        if(dependencyChanged) status._lastChangedBuildId = this._currentBuildId;
         // If there exists a dependency which is still not built, OR missing, OR errored on its last build - we cannot build ourselves
         if ([...dependsOn ?? []].find(dep => this._remainingBuildItems.has(dep) || !this._buildStatus[dep] || this._buildStatus[dep]._buildData.state === 'error')) {
             return;
         }
 
-        // This should always exist
-        const status = this._buildStatus[itemId]!;
-        const builder = status._buildData.builder;
 
         if (this._remainingBuildItems.delete(itemId)) {
             // Can the build be cached
@@ -146,22 +173,22 @@ export default class BuildOrchestrator<ItemIds extends string, Metadata extends 
                 const report = {
                     state: "built",
                     buildStyle: "cached",
-                } satisfies BuildResult<Metadata>;
+                } satisfies BuildResult<Metadata, ErrorCode>;
 
                 status._buildData = {
                     ...status._buildData,
                     ...report,
                 }
 
-                this.OnEntrypointBuilt(itemId);
+                this.OnEntrypointBuilt(itemId, true);
             }
             // If it cannot be cached, initiate a full build
             else {
                 const abortController = new AbortController();
                 this._currentlyBuilding.set(itemId, abortController);
 
-                new Promise<BuildResult<Metadata>>((resolve, reject) => {
-                    abortController.signal.addEventListener("abort", reject);
+                new Promise<BuildResult<Metadata, ErrorCode>>((resolve, reject) => {
+                    abortController.signal.addEventListener("abort", () => reject("build-aborted"));
                     builder.build(status._buildData as Metadata).then(resolve, reject);
                 }).then(result => {
                     status._buildData = {
@@ -172,20 +199,21 @@ export default class BuildOrchestrator<ItemIds extends string, Metadata extends 
                     // If the build succeeded, we run post build normally
                     if (result.state === 'built') {
                         status._lastBuildId = this._currentBuildId;
-                        this.OnEntrypointBuilt(itemId);
+                        this.OnEntrypointBuilt(itemId, true, true);
                     }
                     // Otherwise, we try to finish the build
                     else {
-                        this.TryFinishBuild();
+                        this.OnEntrypointBuilt(itemId, false);
                     }
                 }, failure => {
                     const report = {
                         state: "error",
                         errors: [{
                             errorType: "compile-error",
-                            message: `An error occured - ${failure}`,
+                            errorCode: failure === "build-aborted" ? "build-aborted" : "unknown-error",
+                            message: failure === "build-aborted" ? "The build was aborted" : `An error occured - ${failure}`,
                         }]
-                    } satisfies BuildResult<Metadata>;
+                    } satisfies BuildResult<Metadata, ErrorCode>;
 
                     status._buildData = {
                         // This can technically carry over unexpected fields, but also the build should never actually error in normal usage so it's not crucial
@@ -194,17 +222,20 @@ export default class BuildOrchestrator<ItemIds extends string, Metadata extends 
                     }
 
                     // Try to finish the build
-                    this.TryFinishBuild();
+                    this.OnEntrypointBuilt(itemId, false);
                 });
             }
         }
     }
 
-    private OnEntrypointBuilt<ItemId extends ItemIds>(itemId: ItemId) {
-        const usedBy = this._usedBy[itemId];
-        if (usedBy) {
-            [...usedBy].forEach((user) => this.TryRebuildEntrypoint(user));
+    private OnEntrypointBuilt<ItemId extends ItemIds>(itemId: ItemId, success: boolean, changed: boolean = false) {
+        if (success) {
+            const usedBy = this._usedBy[itemId];
+            if (usedBy) {
+                [...usedBy].forEach((user) => this.TryRebuildEntrypoint(user, changed));
+            }
         }
+        this._currentlyBuilding.delete(itemId);
         this.TryFinishBuild();
     }
 
@@ -226,9 +257,11 @@ export default class BuildOrchestrator<ItemIds extends string, Metadata extends 
         if (!this.IsCurrentlyBuilding) return;
         // A build can only be finished when no entrypoints are currently being built
         if (this._currentlyBuilding.size === 0) {
+            this._isCurrentlyBuilding = false;
             // The build succeeds if no entry points errored, AND we have no remaining build items
             this._lastBuildSucceeded = this._remainingBuildItems.size === 0 && !(Object.keys(this._buildStatus) as ItemIds[]).some(itemId => this._buildStatus[itemId]!._buildData.state === "error");
 
+            this.Events.emit('build-status-changed', this._lastBuildSucceeded ? 'finished' : 'interrupted');
             // Now, if we did have remaining build items, it means they were waiting for dependencies that never built
             // As such, we mark those appropriately
             if (!this._lastBuildSucceeded) {
@@ -250,8 +283,8 @@ export default class BuildOrchestrator<ItemIds extends string, Metadata extends 
                                 errorType: "dependency-failure",
                                 message: `The following dependencies used by this entrypoint did not build correctly - [${erroredDeps.join(", ")}]`,
                             },
-                        ].filter(Boolean) as BuildError[],
-                    } satisfies BuildResult<Metadata>
+                        ].filter(Boolean) as BuildError<ErrorCode>[],
+                    } satisfies BuildResult<Metadata, ErrorCode>
 
                     status._buildData = {
                         ...status._buildData,
@@ -264,10 +297,10 @@ export default class BuildOrchestrator<ItemIds extends string, Metadata extends 
         }
     }
 
-    public async AddEntrypoint<ItemId extends ItemIds>(itemId: ItemId, builder: Builder<ItemId, Metadata>) {
+    public async AddEntrypoint<ItemId extends ItemIds>(itemId: ItemId, builder: Builder<ItemId, Metadata, ErrorCode>) {
         await this.RemoveEntrypoint(itemId);
 
-        const builderInstance = builder(itemId, this.prod);
+        const builderInstance = builder(itemId, this._prod);
         this._buildStatus[itemId] = {
             _lastBuildId: -1,
             _lastChangedBuildId: this._currentBuildId,
@@ -275,14 +308,16 @@ export default class BuildOrchestrator<ItemIds extends string, Metadata extends 
                 builder: builderInstance,
                 state: "pending",
             }
-        } satisfies BuildStatus<ItemId, Metadata>;
+        } satisfies BuildStatus<ItemId, Metadata, ErrorCode>;
 
         this.RefreshDependencies(itemId, builderInstance.dependencies());
-        if (this.watch) await builderInstance.watch((change) => this.OnEntrypointChanged(itemId, change));
+        if (this._watch) await builderInstance.watch((change) => this.OnEntrypointChanged(itemId, change));
         this.OnEntrypointChanged(itemId, "discovered");
     }
 
     public async RemoveEntrypoint<ItemId extends ItemIds>(itemId: ItemId) {
+        if (!this._buildStatus[itemId]) return;
+
         const dependencies = this._dependsOn[itemId];
         if (dependencies) {
             [...dependencies].forEach(dep => this.RemoveDependency(dep, itemId));
@@ -315,7 +350,7 @@ export default class BuildOrchestrator<ItemIds extends string, Metadata extends 
 
     private OnEntrypointChanged<ItemId extends ItemIds>(itemId: ItemId, change: EntrypointChanged) {
         // This method only does anything significant in watch mode - to build in non-watch mode simply call build when you're ready
-        if (!this.watch) return;
+        if (!this._watch) return;
 
         const isCurrentlyBuilding = this.IsCurrentlyBuilding;
 
@@ -371,7 +406,7 @@ export default class BuildOrchestrator<ItemIds extends string, Metadata extends 
                 const builder = buildData!.builder;
                 // TODO - introduce some sort of mechanism to make sure an entrypoing can't be re-added until its dispose method finishes running
                 // In practice, for now this shouldn't really cause any issues due to debounces
-                builder.dispose(buildData as BuildResult<Metadata>);
+                builder.dispose(buildData as BuildResult<Metadata, ErrorCode>);
                 delete this._buildStatus[itemId];
         }
 
@@ -389,6 +424,7 @@ export default class BuildOrchestrator<ItemIds extends string, Metadata extends 
     public Dispose() {
         this.InterruptBuild();
         this._buildDebounce.Terminate();
+        this.Events.removeAllListeners();
         (Object.keys(this._buildStatus) as ItemIds[]).forEach(itemId => this.RemoveEntrypoint(itemId));
     }
 }

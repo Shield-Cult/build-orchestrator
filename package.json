@@ -6,7 +6,7 @@
   "type": "module",
   "main": "main.mts",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node --experimental-strip-types --disable-warning=ExperimentalWarning --test tests/**/*.test.mts"
   },
   "license": "ISC",
   "devDependencies": {

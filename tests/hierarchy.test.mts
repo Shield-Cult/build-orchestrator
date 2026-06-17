@@ -1,0 +1,1 @@
+// Normal valid hierarchy (A->B, B->C), tests that everything works and that rebuilds and caches propagate cleanly

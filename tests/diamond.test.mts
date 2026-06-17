@@ -1,0 +1,1 @@
+// Tests for valid branching (A->B, A->C), then adds diamond (B->D, C->D) and ensures things break, even when we then remove B
