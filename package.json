@@ -11,5 +11,11 @@
   "license": "ISC",
   "devDependencies": {
     "@types/node": "^25.9.3"
-  }
+  },
+  "files": [
+    "main.mts",
+    "package.json",
+    "LICENSE",
+    "README.md"
+  ]
 }
