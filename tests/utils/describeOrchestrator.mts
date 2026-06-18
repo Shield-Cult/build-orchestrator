@@ -18,9 +18,9 @@ export class MockBuildersContainer<ItemIds extends string, Metadata extends obje
         buildStyle: 'full',
     } satisfies BuilderBuildResult<Metadata, ErrorCode>
 
-    public async AddEntrypoint(itemId: ItemIds, initialDependencies: ItemIds[] = []) {
+    public async AddEntrypoint(itemId: ItemIds, ...initialDependencies: ItemIds[]) {
         await this.RemoveEntrypoint(itemId);
-        this._entrypointDependencies.set(itemId, initialDependencies);
+        this._entrypointDependencies.set(itemId, initialDependencies ?? []);
         this._entrypointBuildData.set(itemId, this.DefaultBuildResult)
         return this._orchestrator.AddEntrypoint(itemId, (itemId, prod) => ({
             builderType: `mock-builder`,
@@ -76,8 +76,8 @@ export class MockBuildersContainer<ItemIds extends string, Metadata extends obje
         this._entrypointTriggerChange.get(itemId)!('changed');
     }
 
-    public UpdateEntrypointDependencies(itemId: ItemIds, dependencies: ItemIds[]) {
-        this._entrypointDependencies.set(itemId, dependencies);
+    public UpdateEntrypointDependencies(itemId: ItemIds, ...dependencies: ItemIds[]) {
+        this._entrypointDependencies.set(itemId, dependencies ?? []);
         this._entrypointTriggerChange.get(itemId)!('dependencies-changed');
     }
 }

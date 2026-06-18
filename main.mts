@@ -160,8 +160,8 @@ export default class BuildOrchestrator<ItemIds extends string, Metadata extends 
         const builder = status._buildData.builder;
 
         if(dependencyChanged) status._lastChangedBuildId = this._currentBuildId;
-        // If there exists a dependency which is still not built, OR missing, OR errored on its last build - we cannot build ourselves
-        if ([...dependsOn ?? []].find(dep => this._remainingBuildItems.has(dep) || !this._buildStatus[dep] || this._buildStatus[dep]._buildData.state === 'error')) {
+        // If there exists a dependency which is still not built, OR missing, OR currently building, OR errored on its current build - we cannot build ourselves
+        if ([...dependsOn ?? []].some(dep => this._remainingBuildItems.has(dep) || !this._buildStatus[dep] || this._currentlyBuilding.has(dep) || this._buildStatus[dep]._buildData.state === 'error')) {
             return;
         }
 
@@ -236,13 +236,13 @@ export default class BuildOrchestrator<ItemIds extends string, Metadata extends 
     }
 
     private OnEntrypointBuilt<ItemId extends ItemIds>(itemId: ItemId, success: boolean, changed: boolean = false) {
+        this._currentlyBuilding.delete(itemId);
         if (success) {
             const usedBy = this._usedBy[itemId];
             if (usedBy) {
                 [...usedBy].forEach((user) => this.TryRebuildEntrypoint(user, changed));
             }
         }
-        this._currentlyBuilding.delete(itemId);
         setImmediate(() => this.TryFinishBuild());
     }
 
@@ -274,7 +274,7 @@ export default class BuildOrchestrator<ItemIds extends string, Metadata extends 
                     const dependencies = [...this._dependsOn[itemId] ?? []];
 
                     const missingDeps = dependencies.filter(dep => !this._buildStatus[dep]);
-                    const erroredDeps = dependencies.filter(dep => this._buildStatus[dep]?._buildData.state === "error");
+                    const erroredDeps = dependencies.filter(dep => this._remainingBuildItems.has(dep) || this._buildStatus[dep]?._buildData.state === "error");
                     const report = {
                         state: "error",
                         errors: ([
