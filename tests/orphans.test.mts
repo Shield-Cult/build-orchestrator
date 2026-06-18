@@ -1,6 +1,7 @@
 import { it } from "node:test";
 import { describeOrchestrator } from "./utils/describeOrchestrator.mts";
 import assert from "node:assert";
+import AssertBuildStatus from "./utils/assertBuildStatus.mts";
 
 type ItemIds = 'A' | 'B' | 'C' | 'D'
 type Metadata = {}
@@ -25,21 +26,76 @@ describeOrchestrator<ItemIds, Metadata, CustomErrorCodes>("Given orphan items A,
     it("Should rebuild only the changed item", async () => {
         buildersContainer.TriggerEntrypointChange('A');
         assert((await buildImmediate()), 'Failed to build');
-        assert(orchestrator.BuildReport.A!._buildData.state === 'built', 'Changed item did not rebuild');
-        assert(orchestrator.BuildReport.A!._buildData.buildStyle === 'full', 'Changed item did not perform a full rebuild');
 
-        assert(orchestrator.BuildReport.B!._buildData.state === 'built', 'Unchanged item failed to build');
-        assert(orchestrator.BuildReport.B!._buildData.buildStyle === 'cached', 'Unchanged item performed a full rebuild instead of being cached');
-        
-        assert(orchestrator.BuildReport.C!._buildData.state === 'built', 'Unchanged item failed to build');
-        assert(orchestrator.BuildReport.C!._buildData.buildStyle === 'cached', 'Unchanged item performed a full rebuild instead of being cached');
-        
-        assert(orchestrator.BuildReport.D!._buildData.state === 'built', 'Unchanged item failed to build');
-        assert(orchestrator.BuildReport.D!._buildData.buildStyle === 'cached', 'Unchanged item performed a full rebuild instead of being cached');
-    })
+        AssertBuildStatus(orchestrator, {
+            A: 'built-full',
+            B: 'built-cached',
+            C: 'built-cached',
+            D: 'built-cached'
+        });
+    });
 
-    // All these tests should be done on all configurations
-    // Ensures that if we fail/terminate any of these entrypoints the whole build fails
-    // Ensures that if we interrupt the build it stays broken until the rebuild, and that THEN the rebuild works properly
-    // Ensure that removing or adding an entrypoint works as intended
+    it("Should fail if any specific item fails", async () => {
+        buildersContainer.SetBuildItem('A', {
+            state: 'error',
+            errors: [{
+                errorType: 'compile-error',
+                errorCode: 'unknown-error',
+                message: 'This item should fail'
+            }]
+        });
+        assert(!(await buildImmediate()), 'Build should have failed');
+
+        AssertBuildStatus(orchestrator, {
+            A: 'errored',
+            B: 'built-any',
+            C: 'built-any',
+            D: 'built-any',
+        });
+    });
+
+    it("Should fail if any specific item is interrupted", async () => {
+        buildersContainer.SetBuildItem('A', undefined);
+        const build = buildImmediate();
+        buildersContainer.TriggerEntrypointChange('A');
+        assert(!(await build), 'Build should have failed');
+
+        AssertBuildStatus(orchestrator, {
+            A: 'errored',
+        });
+    });
+
+    it("Should succeed if an item is removed before finishing build/added during build", async () => {
+        buildersContainer.SetBuildItem('B', undefined);
+        const build = buildImmediate();
+        await buildersContainer.RemoveEntrypoint('B');
+        assert((await build), 'Failed to build');
+        
+        buildersContainer.SetBuildItem('A', undefined);
+        const build2 = buildImmediate();
+        await buildersContainer.AddEntrypoint('B');
+        buildersContainer.ReleaseHangingItem('A');
+        assert((await build2), 'Failed to build');
+
+        AssertBuildStatus(orchestrator, {
+            A: 'built-any',
+            B: 'built-any',
+        });
+        
+        buildersContainer.ResetBuildItem('A');
+        assert((await buildImmediate()), 'Rebuild should now work');
+    });
+    
+    it("Should fail if an item is removed after it was built", async () => {
+        buildersContainer.SetBuildItem('B', undefined);
+        const build = buildImmediate();
+        await buildersContainer.RemoveEntrypoint('A');
+        assert(!(await build), 'Build should have failed');
+        
+        buildersContainer.ResetBuildItem('B');
+        assert((await buildImmediate(), 'Failed to build'));
+
+        await buildersContainer.AddEntrypoint('A');
+        assert((await buildImmediate()), 'Rebuild should now work');
+    });
 })

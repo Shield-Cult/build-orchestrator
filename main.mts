@@ -50,7 +50,7 @@ export type BuildStatus<ItemId extends string, Metadata extends object, ErrorCod
 
 export type BuildError<ErrorCode extends string> = {
     errorType: 'compile-error' | 'validation-error' | 'dependency-failure';
-    errorCode: ErrorCode | 'build-aborted' | 'unknown-error';
+    errorCode: ErrorCode | 'build-aborted' | 'missing-dependencies' | 'errored-dependencies' | 'unknown-error';
     message: string;
     location?: string;
 }
@@ -165,7 +165,6 @@ export default class BuildOrchestrator<ItemIds extends string, Metadata extends 
             return;
         }
 
-
         if (this._remainingBuildItems.delete(itemId)) {
             // Can the build be cached
             if (status._lastBuildId >= status._lastChangedBuildId) {
@@ -191,6 +190,10 @@ export default class BuildOrchestrator<ItemIds extends string, Metadata extends 
                     abortController.signal.addEventListener("abort", () => reject("build-aborted"));
                     builder.build(status._buildData as Metadata).then(resolve, reject);
                 }).then(result => {
+                    if(this._currentlyBuilding.get(itemId) !== abortController) {
+                        // Item was deleted
+                        return;
+                    }
                     status._buildData = {
                         builder,
                         ...result,
@@ -206,6 +209,10 @@ export default class BuildOrchestrator<ItemIds extends string, Metadata extends 
                         this.OnEntrypointBuilt(itemId, false);
                     }
                 }, failure => {
+                    if(this._currentlyBuilding.get(itemId) !== abortController) {
+                        // Item was deleted
+                        return;
+                    }
                     const report = {
                         state: "error",
                         errors: [{
@@ -236,15 +243,11 @@ export default class BuildOrchestrator<ItemIds extends string, Metadata extends 
             }
         }
         this._currentlyBuilding.delete(itemId);
-        this.TryFinishBuild();
+        setImmediate(() => this.TryFinishBuild());
     }
 
     private InterruptEntrypointBuild<ItemId extends ItemIds>(itemId: ItemId) {
-        const controller = this._currentlyBuilding.get(itemId);
-        if (controller) {
-            controller.abort();
-            this._currentlyBuilding.delete(itemId);
-        }
+        this._currentlyBuilding.get(itemId)?.abort();
     }
 
     private InterruptBuild() {
@@ -266,30 +269,39 @@ export default class BuildOrchestrator<ItemIds extends string, Metadata extends 
             // As such, we mark those appropriately
             if (!this._lastBuildSucceeded) {
                 [...this._remainingBuildItems].forEach(itemId => {
-                    // These should always exist
+                    // This should always exist
                     const status = this._buildStatus[itemId]!;
-                    const dependencies = [...this._dependsOn[itemId]!];
+                    const dependencies = [...this._dependsOn[itemId] ?? []];
 
                     const missingDeps = dependencies.filter(dep => !this._buildStatus[dep]);
                     const erroredDeps = dependencies.filter(dep => this._buildStatus[dep]?._buildData.state === "error");
                     const report = {
                         state: "error",
-                        errors: [
-                            missingDeps && {
+                        errors: ([
+                            missingDeps.length > 0 && {
                                 errorType: "dependency-failure",
+                                errorCode: 'missing-dependencies',
                                 message: `The following dependencies used by this entrypoint were not located - [${missingDeps.join(", ")}]`,
                             },
-                            erroredDeps && {
+                            erroredDeps.length > 0 && {
                                 errorType: "dependency-failure",
+                                errorCode: 'errored-dependencies',
                                 message: `The following dependencies used by this entrypoint did not build correctly - [${erroredDeps.join(", ")}]`,
                             },
-                        ].filter(Boolean) as BuildError<ErrorCode>[],
+                            dependencies.length === 0 && {
+                                errorType: "compile-error",
+                                errorCode: 'build-aborted',
+                                message: 'The build was forcefuly cancelled before this root item could be built'
+                            },
+                        ] satisfies (BuildError<ErrorCode> | false)[]).filter(Boolean) as BuildError<ErrorCode>[]
                     } satisfies BuildResult<Metadata, ErrorCode>
 
                     status._buildData = {
                         ...status._buildData,
                         ...report,
                     }
+
+                    status._lastChangedBuildId = this._currentBuildId;
                 })
             }
 
@@ -394,6 +406,7 @@ export default class BuildOrchestrator<ItemIds extends string, Metadata extends 
                     else if (this._currentlyBuilding.has(itemId)) {
                         // We successfully interrupted this entrypoint from building, the build is still salvagable
                         this.InterruptEntrypointBuild(itemId);
+                        this._currentlyBuilding.delete(itemId);
                     }
                     else {
                         // The entrypoint was already build and already polluted the build - force a full rebuild

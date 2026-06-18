@@ -1,4 +1,4 @@
-import { after, describe, mock } from 'node:test';
+import { after, afterEach, describe, mock } from 'node:test';
 import BuildOrchestrator from '../../main.mts';
 import type { BuilderBuildResult, BuilderInstance, BuildStatusCode, EntrypointChanged } from '../../main.mts';
 
@@ -6,6 +6,7 @@ export class MockBuildersContainer<ItemIds extends string, Metadata extends obje
     private readonly _entrypointDependencies = new Map<ItemIds, ItemIds[]>();
     private readonly _entrypointBuildData = new Map<ItemIds, BuilderBuildResult<Metadata, ErrorCode>>
     private readonly _entrypointTriggerChange = new Map<ItemIds, (change: Extract<EntrypointChanged, 'changed' | 'dependencies-changed'>) => void>();
+    private readonly _entrypointReleaseHanging = new Map<ItemIds, (result: BuilderBuildResult<Metadata, ErrorCode>) => void>;
 
     private readonly _orchestrator: BuildOrchestrator<ItemIds, Metadata, ErrorCode>;
     public constructor(orchestrator: BuildOrchestrator<ItemIds, Metadata, ErrorCode>) {
@@ -17,7 +18,8 @@ export class MockBuildersContainer<ItemIds extends string, Metadata extends obje
         buildStyle: 'full',
     } satisfies BuilderBuildResult<Metadata, ErrorCode>
 
-    public AddEntrypoint(itemId: ItemIds, initialDependencies: ItemIds[] = []) {
+    public async AddEntrypoint(itemId: ItemIds, initialDependencies: ItemIds[] = []) {
+        await this.RemoveEntrypoint(itemId);
         this._entrypointDependencies.set(itemId, initialDependencies);
         this._entrypointBuildData.set(itemId, this.DefaultBuildResult)
         return this._orchestrator.AddEntrypoint(itemId, (itemId, prod) => ({
@@ -32,6 +34,7 @@ export class MockBuildersContainer<ItemIds extends string, Metadata extends obje
                 this._entrypointDependencies.delete(itemId);
                 this._entrypointBuildData.delete(itemId);
                 this._entrypointTriggerChange.delete(itemId);
+                this._entrypointReleaseHanging.delete(itemId);
             },
         }));
     }
@@ -40,12 +43,29 @@ export class MockBuildersContainer<ItemIds extends string, Metadata extends obje
         return async () => new Promise((resolve) => {
             const result = this._entrypointBuildData.get(itemId);
             if (result) resolve(result);
+            else this._entrypointReleaseHanging.set(itemId, resolve);
         });
     }
 
     public SetBuildItem(itemId: ItemIds, result?: BuilderBuildResult<Metadata, ErrorCode>) {
         if (result) this._entrypointBuildData.set(itemId, result);
         else this._entrypointBuildData.delete(itemId);
+        this.TriggerEntrypointChange(itemId);
+    }
+
+    public ResetBuildItem(itemId: ItemIds) {
+        this._entrypointBuildData.set(itemId, this.DefaultBuildResult);
+        this.TriggerEntrypointChange(itemId);
+    }
+
+    public ReleaseHangingItem(itemId: ItemIds, result?: BuilderBuildResult<Metadata, ErrorCode>) {
+        this._entrypointReleaseHanging.get(itemId)?.(result ?? this.DefaultBuildResult);
+    }
+
+    public ResetAllItems() {
+        [...this._entrypointTriggerChange.keys()].forEach(key => {
+            this.ResetBuildItem(key);
+        })
     }
 
     public RemoveEntrypoint(itemId: ItemIds) {
@@ -79,6 +99,30 @@ export async function describeOrchestrator<ItemIds extends string, Metadata exte
     describe(description, () => {
         mock.timers.enable({ apis: ['setTimeout'] });
         const orchestrator = new BuildOrchestrator<ItemIds, Metadata, ErrorCode>(prod, true, debounceMs);
+        const buildersContainer = new MockBuildersContainer<ItemIds, Metadata, ErrorCode>(orchestrator);
+
+        const buildImmediate = async () => {
+            let result: boolean | undefined;
+            const onStatus = (status: BuildStatusCode) => {
+                if (status === 'finished') result = true;
+                if (status === 'interrupted') result = false;
+            };
+            orchestrator.Events.on('build-status-changed', onStatus);
+            try {
+                mock.timers.tick(debounceMs);
+                while (orchestrator.IsCurrentlyBuilding && result === undefined) {
+                    await new Promise<void>(resolve => setImmediate(resolve));
+                }
+                return result ?? orchestrator.IsValid;
+            } finally {
+                orchestrator.Events.off('build-status-changed', onStatus);
+            }
+        };
+
+        afterEach(async () => {
+            buildersContainer.ResetAllItems();
+            await buildImmediate();
+        });
 
         after(() => {
             orchestrator.Dispose()
@@ -87,24 +131,8 @@ export async function describeOrchestrator<ItemIds extends string, Metadata exte
 
         tester({
             orchestrator,
-            buildersContainer: new MockBuildersContainer<ItemIds, Metadata, ErrorCode>(orchestrator),
-            buildImmediate: async () => {
-                let result: boolean | undefined;
-                const onStatus = (status: BuildStatusCode) => {
-                    if (status === 'finished') result = true;
-                    if (status === 'interrupted') result = false;
-                };
-                orchestrator.Events.on('build-status-changed', onStatus);
-                try {
-                    mock.timers.tick(debounceMs);
-                    while (orchestrator.IsCurrentlyBuilding) {
-                        await new Promise<void>(resolve => setImmediate(resolve));
-                    }
-                    return result ?? orchestrator.IsValid;
-                } finally {
-                    orchestrator.Events.off('build-status-changed', onStatus);
-                }
-            },
+            buildersContainer,
+            buildImmediate,
         });
     });
 }
