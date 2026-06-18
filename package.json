@@ -1,8 +1,12 @@
 {
-  "name": "build-orchestrator",
-  "version": "0.0.1",
+  "name": "@shield-cult/build-orchestrator",
+  "version": "0.0.2",
   "author": "shield-cult-studios",
   "description": "Standard build orchestrator used by Shield Cult projects",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Shield-Cult/build-orchestrator/"
+  },
   "type": "module",
   "main": "main.mts",
   "scripts": {
