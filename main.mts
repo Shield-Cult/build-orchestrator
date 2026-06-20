@@ -70,7 +70,7 @@ export type BuilderInstance<ItemId extends string, Metadata extends object, Erro
     itemId: ItemId;
     dependencies: () => ItemId[];
     watch: (onChange: (change: Extract<EntrypointChanged, 'changed' | 'dependencies-changed'>) => void) => Promise<void>;
-    build: (metadata: Partial<Metadata>) => Promise<BuilderBuildResult<Metadata, ErrorCode>>
+    build: (metadata: Partial<Metadata>, signal: AbortSignal) => Promise<BuilderBuildResult<Metadata, ErrorCode>>
     dispose: (metadata: Partial<Metadata>) => Promise<void>
 }
 
@@ -188,7 +188,7 @@ export default class BuildOrchestrator<ItemIds extends string, Metadata extends 
 
                 new Promise<BuildResult<Metadata, ErrorCode>>((resolve, reject) => {
                     abortController.signal.addEventListener("abort", () => reject("build-aborted"));
-                    builder.build(status._buildData as Metadata).then(resolve, reject);
+                    builder.build(status._buildData as Metadata, abortController.signal).then(resolve, reject);
                 }).then(result => {
                     if(this._currentlyBuilding.get(itemId) !== abortController) {
                         // Item was deleted
