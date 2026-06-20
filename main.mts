@@ -187,8 +187,13 @@ export default class BuildOrchestrator<ItemIds extends string, Metadata extends 
                 this._currentlyBuilding.set(itemId, abortController);
 
                 new Promise<BuildResult<Metadata, ErrorCode>>((resolve, reject) => {
-                    abortController.signal.addEventListener("abort", () => reject("build-aborted"));
-                    builder.build(status._buildData as Metadata, abortController.signal).then(resolve, reject);
+                    const abortListener = () => reject("build-aborted");
+                    abortController.signal.addEventListener("abort", abortListener, {
+                        once: true
+                    });
+                    builder.build(status._buildData as Metadata, abortController.signal).then(resolve, reject).finally(() => {
+                        abortController.signal.removeEventListener("abort", abortListener);
+                    });
                 }).then(result => {
                     if(this._currentlyBuilding.get(itemId) !== abortController) {
                         // Item was deleted
