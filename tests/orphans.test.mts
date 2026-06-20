@@ -5,7 +5,7 @@ import AssertBuildStatus from "./utils/assertBuildStatus.mts";
 
 type ItemIds = 'A' | 'B' | 'C' | 'D'
 type Metadata = {}
-type CustomErrorCodes = ''
+type CustomErrorCodes = never
 
 describeOrchestrator<ItemIds, Metadata, CustomErrorCodes>("Given orphan items A, B, C, D", ({orchestrator, buildersContainer, buildImmediate}) => {
     it("Should add all items without issues", async () => {

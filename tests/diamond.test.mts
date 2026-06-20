@@ -6,7 +6,7 @@ import AssertBuildStatus from "./utils/assertBuildStatus.mts";
 
 type ItemIds = 'A' | 'B' | 'C' | 'D'
 type Metadata = {}
-type CustomErrorCodes = ''
+type CustomErrorCodes = never
 
 describeOrchestrator<ItemIds, Metadata, CustomErrorCodes>("Given diamond shaped items A, B, C, D", ({orchestrator, buildersContainer, buildImmediate}) => {
     it("Should add initial items without issues", async () => {
