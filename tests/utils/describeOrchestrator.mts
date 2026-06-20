@@ -22,7 +22,7 @@ export class MockBuildersContainer<ItemIds extends string, Metadata extends obje
         await this.RemoveEntrypoint(itemId);
         this._entrypointDependencies.set(itemId, initialDependencies ?? []);
         this._entrypointBuildData.set(itemId, this.DefaultBuildResult)
-        return this._orchestrator.AddEntrypoint(itemId, (itemId, prod) => ({
+        return this._orchestrator.AddEntrypoint(itemId, async (itemId, prod) => ({
             builderType: `mock-builder`,
             itemId,
             dependencies: () => this._entrypointDependencies.get(itemId)!,

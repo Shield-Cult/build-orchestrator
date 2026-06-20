@@ -75,7 +75,7 @@ export type BuilderInstance<ItemId extends string, Metadata extends object, Erro
 }
 
 export type Builder<ItemId extends string, Metadata extends object, ErrorCode extends string> = (itemId: ItemId, prod: boolean) =>
-    BuilderInstance<ItemId, Metadata, ErrorCode>;
+    Promise<BuilderInstance<ItemId, Metadata, ErrorCode>>;
 
 export type BuildStatusCode = 'started' | 'interrupted' | 'finished';
 
@@ -312,7 +312,7 @@ export default class BuildOrchestrator<ItemIds extends string, Metadata extends 
     public async AddEntrypoint<ItemId extends ItemIds>(itemId: ItemId, builder: Builder<ItemId, Metadata, ErrorCode>) {
         await this.RemoveEntrypoint(itemId);
 
-        const builderInstance = builder(itemId, this._prod);
+        const builderInstance = await builder(itemId, this._prod);
         this._buildStatus[itemId] = {
             _lastBuildId: -1,
             _lastChangedBuildId: this._currentBuildId,
