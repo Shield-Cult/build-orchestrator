@@ -1,6 +1,6 @@
 {
   "name": "@shield-cult/build-orchestrator",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "author": "shield-cult-studios",
   "description": "Standard build orchestrator used by Shield Cult projects",
   "repository": {
